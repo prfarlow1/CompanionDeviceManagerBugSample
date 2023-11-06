@@ -35,12 +35,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.core.app.ActivityCompat
+import androidx.core.content.IntentCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import com.peterfarlow.companiondeviceservicesample.ui.theme.CompaniondeviceservicesampleTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import java.util.regex.Pattern
 import kotlin.coroutines.resume
 
@@ -94,18 +97,23 @@ class CdmStuff(
             "intentSender1",
             owner,
             ActivityResultContracts.StartIntentSenderForResult()
-        ) {
-            when (it.resultCode) {
+        ) { activityResult ->
+            when (activityResult.resultCode) {
                 Activity.RESULT_OK -> {
                     Log.d(TAG, "result okay")
-                    val result: ScanResult =
-                        it.data?.getParcelableExtra(CompanionDeviceManager.EXTRA_DEVICE)
-                            ?: return@register
+                    val result = activityResult.data?.let {
+                        IntentCompat.getParcelableExtra(it, CompanionDeviceManager.EXTRA_DEVICE, ScanResult::class.java)
+                    } ?: return@register
                     handleConnectionWithDevice(result.device)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        getCdm().startObservingDevicePresence(result.device.address)
+                    } else {
+                        throw IllegalStateException("Can't run this demo on phones that don't support startObservingDevicePresence")
+                    }
                 }
 
                 Activity.RESULT_CANCELED -> {
-                    Log.d(TAG, "result canceled")
+                    Log.e(TAG, "result canceled")
                 }
             }
         }
@@ -135,7 +143,11 @@ class CdmStuff(
             val device = requireNotNull(associationInfo.associatedDevice?.bleDevice?.device)
             Log.d(TAG, "onAssociationCreated")
             handleConnectionWithDevice(device)
-            getCdm().startObservingDevicePresence(device.address)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                getCdm().startObservingDevicePresence(device.address)
+            } else {
+                throw IllegalStateException("Can't run this demo on phones that don't support startObservingDevicePresence")
+            }
         }
 
         override fun onFailure(error: CharSequence?) {
@@ -180,26 +192,36 @@ class CdmStuff(
 
     @SuppressLint("MissingPermission")
     private suspend fun connect(bluetoothDevice: BluetoothDevice) {
-        Log.d(TAG, "connecting to device")
-        suspendCancellableCoroutine { continuation ->
-            bluetoothDevice.connectGatt(activity, true, object : BluetoothGattCallback() {
-                override fun onConnectionStateChange(
-                    gatt: BluetoothGatt?,
-                    status: Int,
-                    newState: Int
-                ) {
-                    if (status == 0 && newState == 2) {
-                        Log.d(TAG, "connected")
-                        continuation.resume(Unit)
-                    } else {
-                        Log.d(TAG, "not connected with newState $newState")
-                        continuation.resume(Unit)
+        withContext(Dispatchers.Main) {
+            Log.d(TAG, "connecting to device")
+            suspendCancellableCoroutine { continuation ->
+                bluetoothDevice.connectGatt(activity, true, object : BluetoothGattCallback() {
+                    override fun onConnectionStateChange(
+                        gatt: BluetoothGatt?,
+                        status: Int,
+                        newState: Int
+                    ) {
+                        if (status == 0 && newState == 2) {
+                            Log.d(TAG, "connected")
+                            try {
+                                continuation.resume(Unit)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "error in coroutine", e)
+                            }
+                        } else {
+                            Log.d(TAG, "not connected with newState $newState")
+                            try {
+                                continuation.resume(Unit)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "error in coroutine", e)
+                            }
+                        }
                     }
-                }
-            })
+                })
+            }
+            val bonded = bluetoothDevice.createBond()
+            Log.d(TAG, "bonded=$bonded")
         }
-        val bonded = bluetoothDevice.createBond()
-        Log.d(TAG, "bonded=$bonded")
     }
 
     private fun getCdm() = activity.getSystemService(CompanionDeviceManager::class.java)
